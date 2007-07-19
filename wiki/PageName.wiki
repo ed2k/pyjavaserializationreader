@@ -1,0 +1,524 @@
+{{{
+
+import dpkt
+
+STREAM_MAGIC = 0xacde
+STREAM_VERSION = 5
+TC_NULL = 0x70
+TC_REFERENCE =	0x71;
+TC_CLASSDESC = 	0x72;
+TC_OBJECT = 	0x73;
+TC_STRING = 	0x74;
+TC_ARRAY = 	0x75;
+TC_CLASS = 	0x76;
+TC_BLOCKDATA = 	0x77;
+TC_ENDBLOCKDATA =	0x78;
+TC_RESET = 	0x79;
+TC_BLOCKDATALONG= 0x7A;
+TC_EXCEPTION = 	0x7B;
+TC_LONGSTRING = 	0x7C;
+TC_PROXYCLASSDESC =	0x7D;
+TC_ENUM =		0x7E;
+TC_MAX = 		0x7E;
+
+baseWireHandle = 0x7e0000;
+
+SC_WRITE_METHOD = 0x01;
+SC_BLOCK_DATA = 0x08;  
+SC_SERIALIZABLE = 0x02;
+SC_EXTERNALIZABLE = 0x04;
+
+SC_ENUM = 0x10;
+
+class WorkingTable:    
+    classdesc_table = {}
+    depth = 0
+    prevobj = ''
+    currobj = ''
+    handle_class_map = {}
+    handle_cnt = 0
+    
+    def get_format(self,classtype):
+        #FIXME make sure first char is typecode or handle
+        if type(classtype) == type(2L):
+            #if not classtype in 
+            classtype = self.handle_class_map[classtype]
+        else: classtype = classtype[1:]
+        return self.classdesc_table[classtype]
+    #each class is defined onece,
+    #TODO classname existence check 
+    def store_class(self,classname,fields):
+        #print hex(self.handle_cnt),'store cltype',classname,fields
+        self.classdesc_table[classname] = fields
+    def set_handle(self, classname):
+        #print 'handle',hex(self.handle_cnt),classname
+        self.handle_class_map[self.handle_cnt] = classname
+        self.handle_cnt += 1        
+
+_debug_ = WorkingTable()
+# TOFIX, figure out how handle is assigned
+
+def prim_typecode_size(code):
+    if code in 'BZ': return 1
+    elif code in 'SC': return 2
+    elif code in 'FI': return 4
+    elif code in 'DJ': return 8
+    else: return -1
+
+# input is Lclass/type/string; or <class_handle> or <prim_type_code> or [...
+# return Lclass.type.string or <class_handle> or ]Lclass.type.
+def get_class_type(str):
+    #print 'gclasstype',[str]
+    if not str[0] in 'BCDFIJSZ[L\x00':
+        print 'fix meeeeeeeeeeeeeeeee',[str]
+        sys.exit()
+    if str[0] == '[':
+        if str[1] != 'L':
+            return str[0:2]
+    s = str.split(';')
+    if len(s) > 1: return '.'.join( s[0].split('/'))
+    else:
+        return Jint(str).value-baseWireHandle
+        
+        
+class Jint(dpkt.Packet):
+    __hdr__ = [
+        ('value','I',0)]
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.data = ''
+        
+class UTF(dpkt.Packet):
+    __hdr__ = [
+        ('slen','H',0)]
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.data =  buf[2:2+self.slen]
+        #print 'UTF',self.slen,self.data
+        
+class NewString(dpkt.Packet):
+    __hdr__ = [('tc','B',TC_STRING),
+        ('slen','H',0)]
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.data =  buf[3:3+self.slen]
+        #print 'string',[self.data]
+        _debug_.set_handle('???NewString:'+self.data),
+   
+
+        
+class Fields(dpkt.Packet):
+    __hdr__ = [
+        ('count','H',0)]
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        offset = 2
+        print 'count',self.count
+        self.ftypes = []
+        for i in xrange(self.count):
+            typecode = buf[offset]
+            offset += 1
+            if typecode in 'BCDEFIJSZ':
+                s = UTF(buf[offset:])
+                offset += len(s)
+                print i,'field',typecode,[s.data]
+                self.ftypes.append((typecode,s.data))
+            elif typecode in '[L':
+                s = UTF(buf[offset:])
+                offset += len(s)
+                if ord(buf[offset]) == TC_STRING:
+                    className1 = NewString(buf[offset:])
+                    offset += len(className1)
+                    print i,'field',typecode,[s.data],[className1.data]
+                    self.ftypes.append((className1.data,s.data))
+                elif  TC_REFERENCE==ord(buf[offset]):
+                    offset += 1
+                    h = buf[offset:offset+4]
+                    offset += 4
+                    print i,'field',typecode,[s.data],[h]
+                    self.ftypes.append((h,s.data))
+                else:
+                    print buf[offset],'not impl'
+            else:
+                print 'sth wrong',typecode
+        self.data = buf[2:offset]
+        #print dpkt.hexdump(self.data)
+
+    def iterate(self):
+        print self.ftypes
+
+
+def Content(buf,classtype = None):
+    tc = ord(buf[0])
+    obj = None
+    #print 'concltype',classtype,dpkt.hexdump(buf[:16])
+
+    if tc == TC_OBJECT:
+        obj = NewObject(buf=buf,classtype=classtype)
+        obj.patch()
+    elif tc == TC_BLOCKDATA:
+        obj = Blockdata(buf)
+    elif tc == TC_CLASS:
+        obj = NewClass(buf)
+    elif tc == TC_ARRAY:
+        obj = NewArray(buf=buf,classtype=classtype)
+        obj.patch()
+    elif tc == TC_STRING:
+        obj = NewString(buf)
+        print 'con:',[obj.data]
+    elif tc == TC_CLASSDESC:
+        obj = NewClassDesc(buf)
+    elif tc == TC_REFERENCE:
+        obj = PrevObject(buf)
+        print 'con prevobj:',hex(obj.handle)
+    else:
+        print 'Content unknown',tc,dpkt.hexdump(buf[:64])
+    return obj
+
+
+class PrevObject(dpkt.Packet):
+    __hdr__ = ( ('tc','B',TC_REFERENCE),
+        ('handle','I',0x7e0000))
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.handle = self.handle - baseWireHandle
+        self.data = ''
+        
+class Blockdata(dpkt.Packet):
+    __hdr__ = [ ('tc','B',TC_BLOCKDATA),
+        ('size','B',1)]
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        self.data = buf[2:2+self.size+2]
+        if ord(self.data[-1]) != TC_NULL or ord(self.data[-2])!= TC_ENDBLOCKDATA:
+            print 'block data not end',self.tc,self.size,dpkt.hexdump(self.data)
+        
+class ClassDescInfo(dpkt.Packet):
+    __hdr__ = [
+        ('flags','B',1)]
+    superClassDesc = None
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        offset = 1
+        print 'classDescInfo flag',self.flags
+        self.fields = Fields(buf[offset:])
+        offset += len(self.fields)
+        if ord(buf[offset]) != TC_ENDBLOCKDATA:
+            print 'not implement class annotation', dpkt.hexdump(buf[0:offset+32])
+        offset += 1
+
+        # superClassDesc, classDesc, 
+        print 'super',
+        if ord(buf[offset]) == TC_NULL:
+            print 'NULL'
+            offset += 1
+        elif ord(buf[offset]) == TC_REFERENCE:
+            ref = PrevObject(buf[offset:])
+            print hex(ref.handle)
+            self.superClassDesc = ref.handle
+            offset+= len(ref)
+        else:
+            self.superClassDesc = NewClassDesc(buf[offset:])
+            offset += len(self.superClassDesc)
+        self.data = buf[1:offset]
+    def iterate(self):
+        if self.fields is None: return []
+        # TODO imple try catch AttributeError
+        if self.superClassDesc is None: return self.fields.ftypes
+        if type(self.superClassDesc) == type(2L):
+            #return _debug_.get_format(self.superClassDesc)
+            # hack to test the guess, fix handle later
+            return _debug_.get_format(self.superClassDesc)+self.fields.ftypes
+        return self.superClassDesc.classDescInfo.iterate() + self.fields.ftypes
+        
+    
+
+class NewClassDesc(dpkt.Packet):
+    __hdr__ = [
+        ('tc','B',TC_CLASSDESC)]
+    className = None
+    
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)        
+        if self.tc != TC_CLASSDESC:
+            print self.tc,'NewClassDesc exception',dpkt.hexdump(buf[0:64])
+        offset = 1
+
+        className = UTF(buf[offset:])
+        print 'class',[className.data]
+        self.className = className.data
+        _debug_.set_handle(self.className)
+        offset = 1+len(className)
+        if offset<2:
+            print 'NewClassDesc exception',dpkt.hexdump(buf[0:64])
+
+        serialVersionUID = buf[offset:4+offset]
+        #print 'serialVersionUID',Jint(serialVersionUID).value,dpkt.hexdump(serialVersionUID)
+        offset += 4
+        newHandle = buf[offset:4+offset]
+        #print 'newHandle',Jint(newHandle).value,dpkt.hexdump(newHandle)
+        offset += 4    
+        self.classDescInfo = ClassDescInfo(buf[offset:])
+        offset += len(self.classDescInfo)        
+        self.data = buf[1:offset]
+        #TODO, put fields here?
+        _debug_.store_class(self.className, self.iterate())        
+                
+    def iterate(self):
+        if self.classDescInfo is None: return []
+        return self.classDescInfo.iterate()
+
+def decode_array_data(buf,classtype):
+    size = Jint(buf)
+    #FIXME, when len(Jint) doesn't work?
+    offset = len(size)
+    print 'd_arr size',size.value, classtype
+    if type(classtype)!=type(2L) and classtype[0] == '[':
+        clsize = prim_typecode_size(classtype[1])
+    else:
+        clsize = -1
+    prevobj = None
+    for i in xrange(size.value):
+        #TODO implement primitive array
+        print 'd_arr',i,prevobj,
+        if ord(buf[offset]) == TC_NULL:
+            print 'NULL'
+            offset += 1
+        elif clsize > 0:
+            print dpkt.hexdump(buf[offset:offset+clsize])
+            offset += clsize            
+        else:
+            if prevobj is None:
+                obj = Content(buf[offset:],classtype)
+                try: prevobj = 'L'+obj.classDesc.className
+                except: pass
+            else:
+                obj = Content(buf[offset:],prevobj)
+            offset += len(obj)
+    return offset
+
+class NewArray(dpkt.Packet):
+    __hdr__ = [
+        ('tc','B',TC_ARRAY)]
+
+    def patch(self):
+        self.unpack(self.buf)
+        self.buf = None
+        
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        _debug_.set_handle('???NewArray')
+        offset = 1
+        if ord(buf[offset]) == TC_NULL:
+            offset += 1
+            self.classDesc = None
+        elif ord(buf[offset]) == TC_REFERENCE:
+            #print dpkt.hexdump(buf[:64])
+            obj = PrevObject(buf[offset:])
+            print 'Newarr prvobj',hex(obj.handle)
+            offset += len(obj)
+            offset += decode_array_data(buf[offset:],self.classtype)
+            self.data = buf[1:offset]
+            return; #-------------------------------------->
+        else:
+            self.classDesc = NewClassDesc(buf[offset:])
+            global _debug_
+            _debug_.currobj = self.classDesc.className
+            offset += len(self.classDesc)
+
+        #TODO, figure out newHandle size
+
+        size = Jint(buf[offset:])
+        #FIXME, when len(Jint) doesn't work?
+        offset += 4
+        
+        print 'array size',size.value, self.classtype
+        if self.classtype[0] == '[':
+            clsize = prim_typecode_size(self.classtype[1])
+        else:
+            clsize = -1
+        #print dpkt.hexdump(buf[offset:offset+32])
+        for i in xrange(size.value):
+            #TODO implement primitive array
+            print 'array',i,
+            if ord(buf[offset]) == TC_NULL:
+                print 'NULL'
+                offset += 1
+            elif clsize > 0:
+                print dpkt.hexdump(buf[offset:offset+clsize])
+                offset += clsize
+            else:
+                #give the array of class type to the decoder, take out [
+                obj = Content(buf[offset:],self.classDesc.className[1:-1])
+                offset += len(obj)
+        self.data = buf[1:offset]
+
+class NewObject(dpkt.Packet):
+    __hdr__ = [
+        ('tc','B',TC_OBJECT)]
+    classtype = None
+    def patch(self):
+        self.unpack(self.buf)
+        self.buf = None
+        
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        offset = 1
+        # put all this into classDesc?
+        if ord(buf[offset]) == TC_NULL:
+            offset += 1
+            self.classDesc = None
+            print 'classDesc is None'
+        elif ord(buf[offset]) == TC_REFERENCE:
+            _debug_.set_handle('???TC_REFERENCE')
+            ref = PrevObject(buf[offset:])
+            offset += len(ref)
+
+            global _debug_
+            #print 'NewObj ref',hex(ref.handle),_debug_.handle_class_map[ref.handle]
+            formats = _debug_.get_format(ref.handle)
+            #formats = _debug_.get_format(self.classtype)
+            
+            idx = 0
+            for (f,vname) in formats:
+                size = prim_typecode_size(f[0])
+                print 'r',idx,[f],vname,
+                idx += 1
+                if size > 0:
+                    value = buf[offset:offset+size]
+                    offset = offset + size
+                    print dpkt.hexdump(value)
+                else:
+                    obj = Content(buf[offset:],get_class_type(f))
+                    offset += len(obj)
+            if ord(buf[offset]) == TC_ENDBLOCKDATA:
+                print 'classdata objectanotation not impl, eat one 0x78'
+                offset += 1        
+            self.data = buf[1:offset]            
+            return; #-------------------------------------->
+        else:
+            self.classDesc = NewClassDesc(buf[offset:])
+            offset += len(self.classDesc)
+
+        # new obj, after classdesc
+        classname = self.classDesc.className
+        _debug_.set_handle('???instance')
+        #TODO, figure out newHandle size
+
+        #classdata decoding
+        fields = self.iterate()
+
+        idx = 0
+        for (f,vname) in fields:
+            size = prim_typecode_size(f[0])
+            print 'o',idx,classname,[f],vname,
+            #dpkt.hexdump(buf[offset:offset+64])
+            idx +=1
+            if size > 0:
+                value = buf[offset:offset+size]
+                offset = offset + size
+                print dpkt.hexdump(value)
+            elif ord(buf[offset]) == TC_NULL:
+                offset += 1
+                print 'NULL'
+            elif f[0] == '[':
+                if ord(buf[offset]) == TC_ARRAY:
+                    arr = NewArray(buf=buf[offset:],classtype=get_class_type(f))
+                    arr.patch()
+                else:
+                    print 'here?',f
+                    arr = Content(buf[offset:],classtype=get_class_type(f))
+                offset += len(arr)
+            else:
+                tc = ord(buf[offset])
+                if tc == TC_OBJECT:
+                    obj = NewObject(buf=buf[offset:],classtype=get_class_type(f))
+                    obj.patch()
+                    offset += len(obj)
+                elif tc == TC_ENDBLOCKDATA:
+                    if ord(buf[offset+1]) == TC_NULL:
+                        offset +=2
+                        print 'END_NULL'
+                    else:
+                        print f,'UNKNOWN'
+                elif tc == TC_BLOCKDATA:
+                    d = Blockdata(buf[offset:])
+                    offset += len(d)
+                    print 'blockdata size',d.size
+                elif tc == TC_STRING:
+                    #print dpkt.hexdump(buf[offset:offset+64])
+                    s = NewString(buf[offset:])
+                    print [s.data]
+                    offset += len(s)
+                elif tc == TC_REFERENCE:
+                    obj = PrevObject(buf[offset:])
+                    print 'NewObj2 prevobj',hex(obj.handle)
+                    offset += len(obj)
+                else:
+                    obj  = Content(buf[offset:],self.classtype)
+                    offset += len(obj)
+                    #print 'not imple0'
+                    #print dpkt.hexdump(buf[offset:offset+64])
+                    #sys.exit()
+
+        #TODO implement classDesc flag
+        #flag = self.classDesc.classDescInfo.flag
+        #if flag == 3:
+        #    if ord(buf[offset]) != TC_ENDBLOCKDATA:
+        #        print 'classdata objectanotation not impl'
+        #    else:
+        #        offset += 1
+        #elif flag != 2:
+        #    print 'flag=',flag,'not impl'
+        if offset < len(buf) and ord(buf[offset]) == TC_ENDBLOCKDATA:
+            print 'classdata objectanotation not impl, eat one 0x78'
+            offset += 1
+            
+        self.data = buf[1:offset]
+        #print dpkt.hexdump(classdata)
+        
+    def iterate(self):
+        if self.classDesc is None: return []
+        return self.classDesc.iterate()
+
+
+class JSER(dpkt.Packet):
+    __hdr__ = (
+        ('magic','H',STREAM_MAGIC),
+        ('version','H',1))
+
+    # assume only one object 
+    def unpack(self, buf):
+        dpkt.Packet.unpack(self, buf)
+        offset = self.__hdr_len__
+        tc = ord(buf[offset])
+
+        print tc,buf[0]
+        if tc == TC_OBJECT:
+            o = NewObject(buf[offset:])
+            offset += len(o)
+            #print dpkt.hexdump(buf[offset-32:offset+40])             
+            #NewObject(buf[offset:])
+   
+        else:
+            print 'not imp'
+            
+    def readObject0(self,buf):
+        _debug_.depth += 1
+        
+        _debug_.depth -= 1
+        
+    def p(self):
+        print self.magic,self.version
+        print dpkt.hexdump(self.data)
+        
+
+if __name__ == '__main__':
+    import dpkt,sys
+    p = JSER(file(sys.argv[1]).read())
+
+    #print dpkt.hexdump(str(p))
+    #p.p()
+
+
+}}}
