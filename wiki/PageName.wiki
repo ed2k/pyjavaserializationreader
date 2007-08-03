@@ -1,6 +1,7 @@
+#labels jser
 {{{
-
-import dpkt
+import dpkt.dpkt as dpkt
+import sys
 
 STREAM_MAGIC = 0xacde
 STREAM_VERSION = 5
@@ -30,67 +31,96 @@ SC_BLOCK_DATA = 0x08;
 
 SC_ENUM = 0x10;
 
+class StackContent:
+    obj = None
+    index = 0
+    def className(self):
+        if self.obj is None: return None
+        if type(self.obj) == type(NewArray()): return self.obj.classDesc
+        return self.obj.className
+    
+    
 class WorkingTable:    
     classdesc_table = {}
     depth = 0
-    prevobj = ''
-    currobj = ''
-    handle_class_map = {}
-    handle_cnt = 0
+    handle_cnt = -1
+    #give us a way to know where are we in the obj tree, after
+    #runing out of data, StackContent = (TC, position)
+    call_stack = []     
+    left_over = '' ;#unprocessed data
+    saved_handle_cnt = -1
+    prev_obj = None
     
-    # input: either handle or L<classname> without ;
-    def getClassDesc(self,classtype):
-        #FIXME make sure first char is typecode or handle
-        if type(classtype) == type(2L):
-            #if not classtype in 
-            classtype = self.handle_class_map[classtype]
-        else: classtype = classtype[1:]
-        return self.classdesc_table[classtype]
+    def getClassDesc(self,handle):
+        return self.classdesc_table[handle]      
 
-    # input: either handle or L<classname> without ;
-    def get_format(self,classtype):
-        #FIXME make sure first char is typecode or handle
-        if type(classtype) == type(2L):
-            #if not classtype in 
-            classtype = self.handle_class_map[classtype]
-        else: classtype = classtype[1:]
-        return self.classdesc_table[classtype].iterate()
-    #each class is defined onece,
-    #TODO classname existence check 
-    def store_class(self,classname,classDesc):
-        #print hex(self.handle_cnt),'store cltype',classname,fields
-        self.classdesc_table[classname] = classDesc
-    def set_handle(self, classname):
-        #print 'handle',hex(self.handle_cnt),classname
-        self.handle_class_map[self.handle_cnt] = classname
-        self.handle_cnt += 1        
+        #pop and save the return obj, working backward
+    def stack_back(self):    
+        self.prev_obj = self.call_stack.pop().obj
+        print 'stack prevobj',type(self.prev_obj)
 
-_debug_ = WorkingTable()
-# TOFIX, figure out how handle is assigned
+    #each class is defined once,
+    #TODO classname existence check or
+    # we need to make sure same obj is saved once, when stream accross
+    # diff packets 
+    def store_class(self,classDesc):
+        self.handle_cnt += 1   
+        self.pr( hex(self.handle_cnt),end=' ')
+        self.classdesc_table[self.handle_cnt] = classDesc
+        #self.call_stack[-1].index = 1
+        #self.saved_handle_cnt = self.handle_cnt        
+        # this is the handle value, it will be used to reference each object
 
-def prim_typecode_size(code):
-    if code in 'BZ': return 1
-    elif code in 'SC': return 2
-    elif code in 'FI': return 4
-    elif code in 'DJ': return 8
-    else: return -1
+    def save(self,idx,buf):
+        self.call_stack[-1].index = idx
+        self.left_over = buf
+        self.saved_handle_cnt = self.handle_cnt
 
-# input is Lclass/type/string; or <class_handle> or <prim_type_code> or [...
-# return Lclass.type.string or <class_handle> or ]Lclass.type.
-def get_class_type(str):
-    #print 'gclasstype',[str]
-    if not str[0] in 'BCDFIJSZ[L\x00':
-        print 'fix meeeeeeeeeeeeeeeee',[str]
-        sys.exit()
-    if str[0] == '[':
-        if str[1] != 'L':
-            return str[0:2]
-    s = str.split(';')
-    if len(s) > 1: return '.'.join( s[0].split('/'))
-    else:
-        return Jint(str).value-baseWireHandle
+    def stack_push(self,obj):
+        stack = StackContent()
+        stack.obj = obj
+        self.saved_handle_cnt = self.handle_cnt
+        self.call_stack.append(stack)        
+    def stack_pop(self):
+        self.call_stack.pop()
         
+    def prdep(self, *args, **kwargs):
+        if not 'sep' in kwargs.keys():  sep = ' '
+        else : sep = kwargs['sep']
+        if not 'end' in kwargs.keys():  end = '\n'
+        else : end = kwargs['end']
+        sys.stdout.write('    '*len(self.call_stack))
+        sys.stdout.write(sep.join([str(x) for x in args]))
+        sys.stdout.write(end)
+
+    def pr(self, *args, **kwargs):
+        if not 'sep' in kwargs.keys():  sep = ' '
+        else : sep = kwargs['sep']
+        if not 'end' in kwargs.keys():  end = '\n'
+        else : end = kwargs['end']
+        sys.stdout.write(sep.join([str(x) for x in args]))
+        sys.stdout.write(end)
+
+#if _debug_ is None:
+#    _debug_ = WorkingTable()
+
+ 
+class Breakable(dpkt.Packet):  
+    def unpack(self, buf):
+        #_debug_.left_over = buf
+        #stack = StackContent()
+        #stack.obj = self
+        #_debug_.call_stack.append(stack)
+        #print 'push',len(_debug_.call_stack),type(self)
+        dpkt.Packet.unpack(self, buf)
         
+
+
+class NewHandle:
+    def __init__(self,obj):
+        _debug_.store_class(obj)
+
+                 
 class Jint(dpkt.Packet):
     __hdr__ = [
         ('value','I',0)]
@@ -104,95 +134,90 @@ class UTF(dpkt.Packet):
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
         self.data =  buf[2:2+self.slen]
-        #print 'UTF',self.slen,self.data
         
-class NewString(dpkt.Packet):
+class NewString(Breakable):
     __hdr__ = [('tc','B',TC_STRING),
         ('slen','H',0)]
     def unpack(self, buf):
-        dpkt.Packet.unpack(self, buf)
+        Breakable.unpack(self, buf)
         self.data =  buf[3:3+self.slen]
-        #print 'string',[self.data]
-        _debug_.set_handle('???NewString:'+self.data),
+        if len(self.data) != self.slen:
+            raise dpkt.NeedData
+        NewHandle(self)
+        
 
 class NullReference(dpkt.Packet):
     __hdr__ = [('tc','B',TC_NULL)]
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
-        print 'TC_NULL'
+        _debug_.pr( 'TC_NULL')
         self.data = ''
 
         
 class Fields(dpkt.Packet):
     __hdr__ = [
         ('count','H',0)]
+    ftypes = []
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
         offset = 2
-        print 'count',self.count
         self.ftypes = []
+        _debug_.prdep('count ', self.count)
         for i in xrange(self.count):
             typecode = buf[offset]
             offset += 1
             if typecode in 'BCDEFIJSZ':
                 s = UTF(buf[offset:])
                 offset += len(s)
-                print i,'field',typecode,[s.data]
+                _debug_.prdep( i,'field',typecode,[s.data])
                 self.ftypes.append((typecode,s.data))
             elif typecode in '[L':
                 s = UTF(buf[offset:])
                 offset += len(s)
-                if ord(buf[offset]) == TC_STRING:
-                    className1 = NewString(buf[offset:])
-                    offset += len(className1)
-                    print i,'field',typecode,[s.data],[className1.data]
-                    self.ftypes.append((className1.data,s.data))
-                elif  TC_REFERENCE==ord(buf[offset]):
-                    offset += 1
-                    h = buf[offset:offset+4]
-                    offset += 4
-                    print i,'field',typecode,[s.data],[h]
-                    self.ftypes.append((h,s.data))
-                else:
-                    print buf[offset],'not impl'
+                _debug_.prdep(i,'field',typecode,[s.data],end=' ')    
+                #only NewString and PrevObject is possible                 
+                className1 = Content(buf[offset:])
+                offset += len(className1)
+                # seems no need to save the exact object info
+                self.ftypes.append((typecode,s.data))
             else:
-                print 'sth wrong',typecode
+                _debug_.pr( 'sth wrong',typecode)
+                offset += 1000
         self.data = buf[2:offset]
-        #print dpkt.hexdump(self.data)
-
-    def iterate(self):
-        print self.ftypes
 
 
-def Content(buf,classtype = None):
+
+
+def Content(buf):
     tc = ord(buf[0])
     obj = None
-    #print 'concltype',classtype,dpkt.hexdump(buf[:16])
+
+    _debug_.depth += 1       
 
     if tc == TC_OBJECT:
-        obj = NewObject(buf=buf,classtype=classtype)
-        obj.patch()
+        obj = NewObject(buf)
     elif tc == TC_BLOCKDATA:
         obj = Blockdata(buf)
     elif tc == TC_CLASS:
         obj = NewClass(buf)
     elif tc == TC_ARRAY:
-        obj = NewArray(buf=buf,classtype=classtype)
-        obj.patch()
+        obj = NewArray(buf)
     elif tc == TC_STRING:
         obj = NewString(buf)
-        print 'content:',[obj.data]
+        _debug_.pr( 'content:',[obj.data])
     elif tc == TC_CLASSDESC:
         obj = NewClassDesc(buf)
     elif tc == TC_REFERENCE:
         obj = PrevObject(buf)
-        print 'conref:',_debug_.handle_class_map[obj.handle]
+        _debug_.pr( 'conref:', hex(obj.handle))
     elif tc == TC_ENUM:
         obj = NewEnum(buf)
     elif tc == TC_NULL:
         obj = NullReference(buf)
     else:
-        print 'Content unknown',tc,dpkt.hexdump(buf[:64])
+        _debug_.pr( 'Content unknown',tc,dpkt.hexdump(buf[:64]))
+
+    _debug_.depth -= 1       
     return obj
 
 
@@ -210,224 +235,214 @@ class Blockdata(dpkt.Packet):
     def unpack(self, buf):
         dpkt.Packet.unpack(self, buf)
         if self.tc != TC_BLOCKDATA:
-            print self.tc, 'blockdata long not impl'
+            _debug_.pr( self.tc, 'blockdata long not impl')
         self.data = buf[2:2+self.size]
-        print 'blockdata',self.size,dpkt.hexdump(self.data)
+        _debug_.pr( 'blockdata',self.size,dpkt.hexdump(self.data))
         
-class ClassDescInfo(dpkt.Packet):
-    __hdr__ = [
-        ('flags','B',1)]
-    superClassDesc = None
-    def unpack(self, buf):
-        dpkt.Packet.unpack(self, buf)
-        offset = 1
-        print 'classDescInfo flag',hex(self.flags)
-        self.fields = Fields(buf[offset:])
-        offset += len(self.fields)
-        if ord(buf[offset]) != TC_ENDBLOCKDATA:
-            print 'not implement class annotation', dpkt.hexdump(buf[0:offset+32])
-        offset += 1
 
-        # superClassDesc, classDesc, 
-        print 'super',
-        if ord(buf[offset]) == TC_NULL:
-            print 'TC_NULL'
-            offset += 1
-        elif ord(buf[offset]) == TC_REFERENCE:
-            ref = PrevObject(buf[offset:])
-            self.superClassDesc = _debug_.getClassDesc(ref.handle)
-            print self.superClassDesc.className            
-            offset+= len(ref)
-        else:
-            self.superClassDesc = NewClassDesc(buf[offset:])
-            offset += len(self.superClassDesc)
-        self.data = buf[1:offset]
-    def iterate(self):
-        if self.fields is None: return []
-        # TODO imple try catch AttributeError
-        if self.superClassDesc is None: return self.fields.ftypes
-        if type(self.superClassDesc) == type(2L):
-            #return _debug_.get_format(self.superClassDesc)
-            # hack to test the guess, fix handle later
-            return _debug_.get_format(self.superClassDesc)+self.fields.ftypes
-        return self.superClassDesc.classDescInfo.iterate() + self.fields.ftypes
-        
-    
 
-class NewClassDesc(dpkt.Packet):
+class NewClassDesc(Breakable):
     __hdr__ = [
         ('tc','B',TC_CLASSDESC)]
     className = None
-    
+    fields = None
+    super = None
+    flags = 0    
     def unpack(self, buf):
-        dpkt.Packet.unpack(self, buf)        
+        Breakable.unpack(self, buf)        
         if self.tc != TC_CLASSDESC:
-            print self.tc,'NewClassDesc exception',dpkt.hexdump(buf[0:64])
+            _debug_.pr( self.tc,'NewClassDesc exception',dpkt.hexdump(buf[0:64]))
         offset = 1
 
         className = UTF(buf[offset:])
-        print 'class',[className.data]
+        _debug_.pr( 'class',[className.data])
         self.className = className.data
-        _debug_.set_handle(self.className)
         offset = 1+len(className)
-        if offset<2:
-            print 'NewClassDesc exception',dpkt.hexdump(buf[0:64])
+        NewHandle(self)
+        self.data = buf[self.__hdr_len__:offset]
+        buf = buf[offset:]    
+        offset = 0
 
-        serialVersionUID = buf[offset:4+offset]
-        #print 'serialVersionUID',Jint(serialVersionUID).value,dpkt.hexdump(serialVersionUID)
-        offset += 4
-        newHandle = buf[offset:4+offset]
-        #print 'newHandle',Jint(newHandle).value,dpkt.hexdump(newHandle)
-        offset += 4    
-        self.classDescInfo = ClassDescInfo(buf[offset:])
-        offset += len(self.classDescInfo)        
-        self.data = buf[1:offset]
-        #TODO, put fields here?
-        _debug_.store_class(self.className, self)        
+        serialVersionUID = buf[offset:8+offset]
+        #_debug_.pr( 'serialVersionUID',Jint(serialVersionUID).value,dpkt.hexdump(serialVersionUID)
+        offset += 8
+        #classDescInfo
+        self.flags = ord(buf[offset]); 
+        offset+=1
+        self.fields = Fields(buf[offset:])
+        offset += len(self.fields)
+        if ord(buf[offset]) != TC_ENDBLOCKDATA:
+            _debug_.pr( 'not implement class annotation', dpkt.hexdump(buf[0:offset+32]))
+        offset += 1
+        # superClassDesc, classDesc, 
+        _debug_.pr( 'super',end=' ')
+        self.data = self.data+buf[:offset]        
+        buf = buf[offset:]    
+        offset = 0
+
+        self.super = Content(buf[offset:])
+        offset += len(self.super)
+
+        if type(self.super) == type(PrevObject()):
+            self.super = _debug_.getClassDesc(self.super.handle)
+            _debug_.pr( self.super.className)
+
+        self.data = self.data+buf[:offset]
 
     def iterateData(self,buf):
-        if not self.classDescInfo.superClassDesc is None:
-            offset = self.classDescInfo.superClassDesc.iterateData(buf)
-        else:
+        _debug_.stack_push(self)   
+        _debug_.save(0,buf)
+        if type(self.super) is type(NullReference()):
             offset = 0
+        else:
+            offset = self.super.iterateData(buf)
+
         classname = self.className
-        formats = self.classDescInfo.fields.ftypes
-        idx = 0
+        formats = self.fields.ftypes
+        _debug_.prdep(len(formats),'data of',classname)
+        idx = 1        
         for (f,vname) in formats:
-            size = prim_typecode_size(f[0])
-            print cl2(classname),idx,[f],vname,
-            #dpkt.hexdump(buf[offset:offset+64])
+            _debug_.prdep( cl2(classname),idx,[f],vname,end=' ')
+            _debug_.save(idx,buf[offset:])
+            offset += GenericObject(f,buf[offset:])
             idx +=1
-            if size > 0:
-                value = buf[offset:offset+size]
-                offset = offset + size
-                print dpkt.hexdump(value)
-            elif ord(buf[offset]) == TC_NULL:
-                offset += 1
-                print 'NULL'
-            else:
-                obj  = Content(buf[offset:],self)
-                offset += len(obj)
-                
-        flags = self.classDescInfo.flags
-        if flags == 0x3 :
+        _debug_.stack_pop()
+        
+        #TODO: protect here        
+        if self.flags == 0x3 :
             while(ord(buf[offset]) != TC_ENDBLOCKDATA):
                obj = Content(buf[offset:])
                offset += len(obj)                                  
             offset +=1
-        elif offset<len(buf) and ord(buf[offset]) == TC_ENDBLOCKDATA:
-            #offset += 1
-            print 'Object: eat one 0x78, dont know why it is here'
+
+        return offset
+
+    def unpack_resume(self,buf):
+        offset = 0
+        classname = self.className
+        formats = self.fields.ftypes       
+        idx = _debug_.call_stack[-1].index        
+        if (not _debug_.prev_obj is None):
+            idx += 1
+        if idx <= len(formats):
+            _debug_.prdep(idx,'in',len(formats),'data of',classname)
+            
+        for (f,vname) in formats[idx-1:]:
+            _debug_.prdep( cl2(classname),idx,[f],vname,end=' ')
+            _debug_.save(idx,buf[offset:])
+            offset += GenericObject(f,buf[offset:])
+            idx +=1
+                
+        if self.flags == 0x3 :
+            while(ord(buf[offset]) != TC_ENDBLOCKDATA):
+               obj = Content(buf[offset:])
+               offset += len(obj)                                  
+            offset +=1
+
+        _debug_.prev_obj = _debug_.call_stack.pop()
+
+        return offset    
+
+def GenericObject(format,buf):
+    code = format[0]
+    size = -1
+    if code in 'BZ': size = 1
+    elif code in 'SC': size = 2
+    elif code in 'FI': size = 4
+    elif code in 'DJ': size = 8
+        
+    if size > 0:
+        value = buf[:size]
+        _debug_.pr( dpkt.hexdump(value))
+        return size
+    else:
+        obj  = Content(buf)
+        return len(obj)
+
+class NewArray(Breakable):
+    __hdr__ = [('tc','B',TC_ARRAY)]
+      
+    def unpack(self, buf):
+        Breakable.unpack(self, buf)
+        offset = 1
+
+        self.classDesc = Content(buf[offset:])
+        offset += len(self.classDesc)
+        if type(self.classDesc) == type(PrevObject()):
+            self.classDesc = _debug_.getClassDesc(self.classDesc.handle)
+
+        NewHandle(self)
+       
+        offset += self.decode_array_data(buf[offset:],self.classDesc)
+        self.data = buf[1:offset]
+        
+    def decode_array_data(self,buf,classdesc):
+        size = Jint(buf)
+        offset = len(size)
+        self.size = size.value
+        #assert first char of className is [ 
+        _debug_.prdep( 'arr size',size.value, classdesc.className)
+        _debug_.stack_push(self)   
+        for i in xrange(size.value):
+            _debug_.prdep( classdesc.className[1:],i,end=' ')
+            _debug_.save(i,buf[offset:])
+            offset += GenericObject(classdesc.className[1:],buf[offset:])
+        _debug_.stack_pop()
+        return offset
+    def unpack_resume(self,buf):
+        offset = 0 
+        className = self.classDesc.className
+        #assert first char of className is [ 
+        _debug_.prdep( 'arr size',self.size, className)
+        idx = _debug_.call_stack[-1].index
+        if (not _debug_.prev_obj is None):
+            idx += 1
+        for i in xrange(idx,self.size):
+            _debug_.prdep( className[1:],i,end=' ')
+            _debug_.save(i,buf[offset:])
+            offset += GenericObject(className[1:],buf[offset:])
+
+        _debug_.prev_obj = _debug_.call_stack.pop()
         return offset
     
-    def iterate(self):
-        if self.classDescInfo is None: return []
-        return self.classDescInfo.iterate()
-
-def decode_array_data(buf,classdesc):
-    size = Jint(buf)
-    #FIXME, when len(Jint) doesn't work?
-    offset = len(size)
-    clsize =-1    
-    #assert first char is [
-    if classdesc.className[1] != 'L':
-        print 'arr size',size.value, classdesc.className
-        clsize = prim_typecode_size(classdesc.className[1])
-        for i in xrange(size.value):
-            print classdesc.className[1],i,
-            print dpkt.hexdump(buf[offset:offset+clsize])
-            offset += clsize  
-    else:
-        print 'arr size',size.value,classdesc.className
-        for i in xrange(size.value):
-            print cl2(classdesc.className[1:]),i,
-            obj = Content(buf[offset:],classdesc.className)
-            offset += len(obj)
-    return offset
-
-class NewArray(dpkt.Packet):
-    __hdr__ = [('tc','B',TC_ARRAY)]
-
-    def patch(self):
-        self.unpack(self.buf)
-        self.buf = None
-        
-    def unpack(self, buf):
-        dpkt.Packet.unpack(self, buf)
-        offset = 1
-        formats = []
-        self.classDesc = readClassDesc(buf[offset:])
-        offset += len(self.classDesc)
-        #print 'type',type(self.classDesc)
-        if type(self.classDesc) == type(PrevObject()):
-            self.classDesc = _debug_.getClassDesc(self.classDesc.handle)
-
-        _debug_.set_handle('???arr instance')           
-        offset+=decode_array_data(buf[offset:],self.classDesc)
-        self.data = buf[1:offset]
-
-def readClassDesc(buf):
-    tc = ord(buf[0])
-    obj = None
-    #print 'concltype',classtype,dpkt.hexdump(buf[:16])
-
-    if tc == TC_CLASSDESC:
-        obj = NewClassDesc(buf)
-    elif tc == TC_REFERENCE:
-        obj = PrevObject(buf)
-        print 'classref:',_debug_.handle_class_map[obj.handle]
-    elif tc == TC_NULL: 
-        obj = NullReference(buf)
-    else:
-        print 'ClassDesc unknown',tc,dpkt.hexdump(buf[:64])
-    return obj
-    
-class NewEnum(dpkt.Packet):
+class NewEnum(Breakable):
     __hdr__ = [('tc','B',TC_ENUM)]
     def unpack(self,buf):
-        dpkt.Packet.unpack(self, buf)
+        Breakable.unpack(self, buf)
         offset = 1
-        self.classDesc = readClassDesc(buf[offset:])
+        self.classDesc = Content(buf[offset:])
         offset += len(self.classDesc)
-        global _debug_
         classname = self.classDesc.className
-        _debug_.set_handle('???enum')     
+        NewHandle(self)     
         name = NewString(buf[offset:])      
-        print 'enum_name',[name.data]  
+        _debug_.pr( 'enum_name',[name.data]  )
         offset += len(name)
         self.data = buf[1:offset]
+        
                         
 def cl2(classname):    return '.'.join(classname.split('.')[-2:])
-class NewObject(dpkt.Packet):
+class NewObject(Breakable):
     __hdr__ = [
         ('tc','B',TC_OBJECT)]
-    classtype = None
-    def patch(self):
-        self.unpack(self.buf)
-        self.buf = None
-                
+    classDesc = None
+               
     def unpack(self, buf):
-        dpkt.Packet.unpack(self, buf)
+        Breakable.unpack(self, buf)
         offset = 1
         formats = []
-        self.classDesc = readClassDesc(buf[offset:])
+        # has to be null,ref or newclassdesc
+        self.classDesc = Content(buf[offset:])
         offset += len(self.classDesc)
-        #print 'type',type(self.classDesc)
+        #_debug_.pr( 'type',type(self.classDesc)
         if type(self.classDesc) == type(PrevObject()):
             self.classDesc = _debug_.getClassDesc(self.classDesc.handle)
         
-        #newhandle
-        _debug_.set_handle('???instance')
+        NewHandle(self)
            
         #classdata decoding
         offset += self.classDesc.iterateData(buf[offset:])
        
         self.data = buf[1:offset]
-
-
-    def iterate(self):
-        if self.classDesc is None: return []
-        return self.classDesc.iterate()
 
 
 class JSER(dpkt.Packet):
@@ -437,22 +452,27 @@ class JSER(dpkt.Packet):
 
     # assume only one object 
     def unpack(self, buf):
-        dpkt.Packet.unpack(self, buf)
-        offset = self.__hdr_len__
-
-        obj = Content(buf[offset:])
-        offset += len(obj)
-        if offset < len(buf):
-            print dpkt.hexdump(buf[offset-16:])             
+        if len(_debug_.call_stack) > 0:
+            buf = _debug_.left_over+buf        
+            _debug_.handle_cnt = _debug_.saved_handle_cnt
+            _debug_.prev_obj = None
+            offset = 0
+            while len(_debug_.call_stack) > 0:
+                offset += _debug_.call_stack[-1].obj.unpack_resume(buf[offset:])
+                        
+        else:
+            dpkt.Packet.unpack(self, buf)
+            offset = self.__hdr_len__
+            obj = Content(buf[offset:])
+            offset += len(obj)
+            #if offset < len(buf):
+            #    _debug_.pr( dpkt.hexdump(buf[offset-16:])  )           
             
-    def readObject0(self,buf):
-        _debug_.depth += 1       
-        _debug_.depth -= 1       
         
 
 if __name__ == '__main__':
     import dpkt,sys
+    _debug_ = WorkingTable()
     p = JSER(file(sys.argv[1]).read())
-
 
 }}}
