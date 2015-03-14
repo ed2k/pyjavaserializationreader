@@ -1,0 +1,238 @@
+
+```
+# foo.cnf
+# FOO conformation file
+
+# $Id$
+
+#.MODULE_IMPORT
+
+#.EXPORTS
+
+#.PDU
+JSER-MESSAGE
+
+#.TYPE_ATTR
+UTF                    TYPE = FT_STRING
+NewString              TYPE = FT_STRING
+//Ss-Code TYPE = FT_UINT16 DISPLAY = BASE_HEX STRINGS = VALS(ssCode_vals)
+NewClassDesc/flags   DISPLAY = BASE_HEX
+NewClassDesc/classAnnotation   DISPLAY = BASE_HEX
+
+#.NO_EMIT
+
+#.TYPE_RENAME
+
+#.FIELD_RENAME
+
+#.FN_PARS 
+
+#.FN_BODY JSER-MESSAGE/contents
+  // place holder to generate hf_T_contents
+
+#.FN_BODY Bits4
+  offset += 4;
+
+#.FN_BODY  NULL
+  // bypass
+#.FN_BODY Content/null
+  // bypass
+#.FN_BODY ClassDesc/cldesc-null
+  // bypass
+
+#.FN_BODY RaiseException
+  proto_tree_add_debug_text(tree, "something wrong");
+  offset = -1;
+
+#.FN_BODY  NewHandle
+   // placeholder to call store_class 
+   // don't display anything
+   store_class(NULL);
+   
+#.FN_BODY  NewString
+   guint16 strlen = tvb_get_ntohs(tvb, offset>>3); 
+//   guint8 *string_value = tvb_get_ephemeral_string(tvb, (offset>>3)+2, strlen);      
+   guint8 *string_value = tvb_get_string(tvb, (offset>>3)+2, strlen);      
+     // NewHandle
+   store_class(NULL);
+   //proto_item_append_text(tree->parent->last_child, "%s", string_value);        
+   proto_item_append_text(tree, "%s", string_value);        
+   //proto_item_set_text(tree,"type NewString");
+   offset += 8*(2 + strlen);
+   g_free(string_value);
+
+//#.FN_BODY Bytes2
+#.FN_BODY PrevObject
+  guint32 handle = tvb_get_ntohl(tvb, (offset>>3));
+  handle -= JSER_BASE_WIRE_HANDLE;
+  proto_item_append_text(tree->parent->last_child, "REF:0x%x", handle); 
+  offset += 8*4;
+
+#.FN_BODY NewArray/arrvalues
+  jser_classdesc_t *p = pop();
+  guint32 size;
+  proto_item *pi;
+  if (p==NULL) {
+    proto_tree_add_debug_text(tree,"newarrvaluees null handle");
+  }
+  
+  size = tvb_get_ntohl(tvb, (offset>>3));
+  pi = proto_tree_add_text(tree, tvb, offset>>3, 4, "");
+  proto_item_set_text(pi, "array size %d: ", size); 
+  offset += 8*4; 
+  tree = proto_item_add_subtree(pi, ett_jser);
+
+  for (; size > 0; size--) {
+    switch (p->array_typecode) {
+      case 'B': case 'Z': 
+        offset = dissect_jser_Byte(tvb, offset, actx, tree, hf_jser_guint8);
+		break;
+      case 'S': case 'C':
+        offset = dissect_jser_Bytes2(tvb, offset, actx, tree, hf_jser_guint16);
+		break;
+      case 'F': case 'I': 
+        offset = dissect_jser_Bytes4(tvb, offset, actx, tree, hf_jser_guint32);
+		break;
+      case 'D': case 'J':
+        offset = dissect_jser_Bytes8(tvb, offset, actx, tree, hf_jser_guint64);
+		break;
+      default: 
+		offset = dissect_jser_Content(tvb, offset, actx, tree, hf_jser_className);
+    } 
+  }
+  
+  
+  
+    
+#.FN_HDR Content
+  proto_item *pi;
+  guint32 byteoffset = offset >>3;
+  guint8 tc = tvb_get_guint8(tvb, byteoffset);
+  if (tc == JSER_TC_OBJECT) {
+    offset = dissect_jser_NewObject(tvb, offset+8, actx, tree, hf_jser_obj);
+  } else if (tc == JSER_TC_STRING) {
+     offset = dissect_jser_NewString(tvb,offset+8, actx, tree ,hf_jser_newString);
+  } else if (tc == JSER_TC_NULL) {
+  	 proto_item_append_text(tree->parent->last_child, "TC_NULL");        
+     offset += 8;
+  } else if (tc == JSER_TC_ENDBLOCKDATA) {
+  	 proto_tree_add_debug_text(tree, "endblockdata in content");        
+     offset = -1;
+  } else if (tc == JSER_TC_REFERENCE) {
+     offset = dissect_jser_PrevObject(tvb,offset+8, actx,
+          tree , hf_jser_ref);
+  } else if (tc == JSER_TC_ARRAY) {
+     offset = dissect_jser_NewArray(tvb,offset+8, actx,
+          tree , hf_jser_arr);  } else {
+#.FN_FTR Content
+  }
+
+#.FN_BODY ClassDesc/cldesc-tc/cldesc-ref
+  jser_classdesc_t *p;
+  guint32 handle = tvb_get_ntohl(tvb, (offset>>3));
+  handle -= JSER_BASE_WIRE_HANDLE;
+  p = getClassDesc(handle);
+  if (p==NULL)
+    proto_tree_add_debug_text(tree,"retrieve %x failed",handle);   
+  push(p);
+  offset = dissect_jser_PrevObject(tvb, offset, actx, tree, hf_jser_ref);
+    
+
+#.FN_HDR NewClassDesc/name
+  jser_classdesc_t *p =  ep_alloc0(sizeof(jser_classdesc_t));
+  guint8 char_2 = tvb_get_guint8(tvb, (offset>>3)+3);
+  p->array_typecode = char_2;
+  proto_item_append_text(tree, " REF:0x%x", jser_handle_cnt);        
+  store_class(p);
+  push(p);
+  
+#.FN_HDR NewClassDesc/flags
+  jser_classdesc_t *p = peek();
+  guint8 flags = tvb_get_guint8(tvb, offset>>3);
+  p->flags = flags;
+
+#.FN_BODY  NewClassDesc/fields
+  /* assume aligned */
+  jser_field_t *fields;
+  jser_field_t *iter;
+  jser_classdesc_t *curr;
+  guint16 count = tvb_get_ntohs(tvb, offset>>3);  
+  offset = dissect_jser_FieldsCount(tvb, offset, actx, tree, hf_jser_count); 
+
+  // initial the typecode list	                                              
+  fields = ep_alloc(count*sizeof(jser_field_t));
+  //save the typecode list in newClassDesc
+  curr = peek();
+  curr->fields = fields;
+  curr->fields_count = count;  
+  iter = fields;   
+  for (; count > 0; count--) {
+    guint8 tc; 
+    guint32 newoffset = offset>>3;
+    guint32 oldoffset = newoffset;
+    proto_item * pi;
+    proto_tree * subtree;          
+    // store formats here
+    // extract first byte, the typecode, save to the list,
+    iter->typecode = tvb_get_guint8(tvb, newoffset);
+    newoffset += 1;         
+    iter->len = tvb_get_ntohs(tvb, newoffset);
+    newoffset += 2;
+    iter->fieldname = tvb_get_ephemeral_string(tvb, newoffset, iter->len);
+    newoffset += iter->len;
+    pi = proto_tree_add_text(tree, tvb, oldoffset, -1, "");
+    proto_item_set_text(pi, "%s: ", iter->fieldname);
+
+    if (iter->typecode == 'L' || iter->typecode == '['){
+       offset = dissect_jser_Content(tvb, newoffset<<3, actx, 
+          proto_item_add_subtree(pi,ett_jser), hf_jser_className);
+    } else {
+      proto_item_append_text(pi, "%c", iter->typecode);        
+      offset += 8*(3 + iter->len);
+    }
+    proto_item_set_len(pi,(offset>>3) - oldoffset);    
+    iter++;        
+  }
+
+#.FN_HDR NewClassDesc/extends
+  proto_item *pi;
+  guint32 byteoffset = offset >>3;
+  guint8 tc = tvb_get_guint8(tvb, byteoffset);
+  
+  jser_classdesc_t *q;
+  jser_classdesc_t *p = peek();
+  if (p==NULL)
+    proto_tree_add_debug_text(tree,"beforesuper handle null");
+
+  if (tc == JSER_TC_NULL) {
+     pi = proto_tree_add_text(tree, tvb, byteoffset, 1, "");
+     proto_item_set_text(pi, "extends: TC_NULL");
+     offset += 8;
+  } else if (tc == JSER_TC_REFERENCE) {
+     pi = proto_tree_add_text(tree, tvb, byteoffset, 5, "");
+     proto_item_set_text(pi, "extends: ");
+     // not normal reference, has special treatment
+     offset = dissect_jser_T_cldesc_ref(tvb,offset+8, actx,
+          proto_item_add_subtree(pi,ett_jser) , hf_jser_ref);
+  } else {
+#.FN_FTR NewClassDesc/extends
+  }
+  //  q should be super class
+  q = peek();       
+  if (q==NULL)
+    proto_tree_add_debug_text(tree,"aftersuper handle null");
+  //save super if it is not null
+  if (p!=q) {
+    p->super = q;
+    pop();
+  } 
+   
+#.FN_BODY NewObject/classdata  
+  jser_classdesc_t *p = pop();
+  if (p==NULL)
+    proto_tree_add_debug_text(tree,"newobjclassdata null handle");
+  offset = iterate_classdata(p, tvb, offset, actx, tree, hf_index);
+
+  
+#.END
+```
