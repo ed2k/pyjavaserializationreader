@@ -1,5 +1,3 @@
-#labels Featured
-{{{
 import dpkt.dpkt as dpkt
 import sys
 
@@ -475,4 +473,3 @@ if __name__ == '__main__':
     _debug_ = WorkingTable()
     p = JSER(file(sys.argv[1]).read())
 
-}}}

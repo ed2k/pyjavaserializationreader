@@ -1,5 +1,3 @@
-#labels wireshark,cnf,jser
-{{{
 # foo.cnf
 # FOO conformation file
 
@@ -235,4 +233,3 @@ NewClassDesc/classAnnotation   DISPLAY = BASE_HEX
 
   
 #.END
-}}}
