@@ -1,5 +1,3 @@
-#labels c,packet,wireshark,jser,template
-{{{
 /* packet-jser.c
  * Routines for jser packet dissection
  *
@@ -343,5 +341,3 @@ proto_reg_handoff_jser(void)
     }
 
 }
-
-}}}
